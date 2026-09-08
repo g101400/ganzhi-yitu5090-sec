@@ -1,5 +1,5 @@
 // 水利工程一张图 PWA Service Worker（离线缓存 App Shell）
-const CACHE = 'shuili-map-pwa-v1-sec';
+const CACHE = 'shuili-map-pwa-v1-sec-sec';
 const ASSETS = ['./', './index.html', './app.js', './secure/dat.enc.js', './secure_gate.js', './jszip.min.js',
   './leaflet/leaflet.css', './leaflet/leaflet.js', './leaflet/images/'];
 self.addEventListener('install', function (e) {
