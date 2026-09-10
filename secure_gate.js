@@ -43,7 +43,7 @@
       '<input id="secIn" type="password" inputmode="numeric" autocomplete="off" placeholder="启动口令" />' +
       '<button id="secBtn">解 锁 进 入</button>' +
       '<div id="secTip"></div>' +
-      '<div id="secHint">默认口令即开发者分机号 3305 · 输错不会泄露任何数据</div>' +
+      '<div id="secHint">默认口令即开发者分机号 · 输错不会泄露任何数据</div>' +
       '</div>';
     document.body.appendChild(wrap);
     var inp = document.getElementById("secIn"), btn = document.getElementById("secBtn"), tip = document.getElementById("secTip");
