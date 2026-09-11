@@ -158,10 +158,12 @@
   var AUTHOR = "科技推广中心";
 
   var LS_KEY = "perc_map_v2";
+  // v1.48：水工建筑物数据层独立库（只经「导入水工建筑物」写入，与感知设备库 perc_map_v2 完全分离）
+  var LS_KEY_WATER = "perc_water_v2";
 
   var APPNAME = "水利感知项目一张图";
 
-  var APP_VERSION = "1.46";
+  var APP_VERSION = "1.48";
 
   var APP_BUILD_DATE = "2026-09-11";
 
@@ -262,7 +264,14 @@
 
 
 
+  // v1.48：数据分两层——感知设备主库 DEVICES（沿用 perc_map_v2）/ 水工建筑物层 WBUILDS（perc_water_v2）
+  //        BUILDINGS = 当前作用域视图，默认指向 DEVICES，故原有 117 处引用在默认态零行为变更。
   var BUILDINGS = [];
+  var DEVICES = [];
+  var WBUILDS = [];
+  var SCOPE = "device";        // device(默认) / water / all
+  var IMPORT_KIND = null;      // "water" = 本次导入只写水工建筑物层
+  var IMPORT_STORE = null;     // 本次导入的目标库（beginImport 解析后固定，贯穿异步流程）
 
   var MARKERS = {};
 
@@ -2143,27 +2152,132 @@ function orgValOrDefault(b, k) {
 
   /* ---------- 存储 ---------- */
 
+  /* ---------- v1.48 数据层：感知设备层 / 水工建筑物层 双库 ---------- */
+
+  function waterSeed() { try { return window.WATER_BUILDINGS ? JSON.parse(JSON.stringify(window.WATER_BUILDINGS)) : []; } catch (e) { return []; } }
+
   function load() {
-
     var embedded = window.PERCEPTION_DATA || window.SHUILI_DATA || [];
-
     try {
-
       var s = localStorage.getItem(LS_KEY);
-
-      if (s) { BUILDINGS = JSON.parse(s); return; }
-
-    } catch (e) {}
-
-    BUILDINGS = JSON.parse(JSON.stringify(embedded));
-
+      DEVICES = s ? JSON.parse(s) : JSON.parse(JSON.stringify(embedded));
+    } catch (e) { DEVICES = JSON.parse(JSON.stringify(embedded)); }
+    if (!Array.isArray(DEVICES)) DEVICES = [];
+    try {
+      var w = localStorage.getItem(LS_KEY_WATER);
+      WBUILDS = w ? JSON.parse(w) : waterSeed();
+    } catch (e) { WBUILDS = waterSeed(); }
+    if (!Array.isArray(WBUILDS)) WBUILDS = [];
+    SCOPE = (SETTINGS && SETTINGS.scope) || "device";
+    if (["device", "water", "all"].indexOf(SCOPE) < 0) SCOPE = "device";
+    applyScopeView();
   }
 
   function save() {
-
-    try { localStorage.setItem(LS_KEY, JSON.stringify(BUILDINGS)); } catch (e) { toast("本地存储失败（可能已满）"); }
-
+    try { localStorage.setItem(LS_KEY, JSON.stringify(DEVICES)); } catch (e) { toast("本地存储失败（可能已满）"); }
+    try { localStorage.setItem(LS_KEY_WATER, JSON.stringify(WBUILDS)); } catch (e) { toast("建筑物层存储失败（可能已满）"); }
   }
+
+  // 归属判定：先看数组归属 → 再看 id 前缀（w = 建筑物层内新建） → 最后按当前作用域兜底
+  function kindOf(b) {
+    if (!b) return "device";
+    if (WBUILDS.indexOf(b) >= 0) return "water";
+    if (DEVICES.indexOf(b) >= 0) return "device";
+    if (String(b.id || "").charAt(0) === "w") return "water";
+    return (SCOPE === "water") ? "water" : "device";
+  }
+  function storeOf(b) { return kindOf(b) === "water" ? WBUILDS : DEVICES; }
+
+  // 本次导入的落库目标：优先取 beginImport 固定的目标，其次按当前作用域
+  function importTargetStore() { return IMPORT_STORE || ((SCOPE === "water") ? WBUILDS : DEVICES); }
+  function beginImport(kind) {
+    var k = kind || ((SCOPE === "water") ? "water" : "device");
+    IMPORT_STORE = (k === "water") ? WBUILDS : DEVICES;
+    IMPORT_KIND = null;
+  }
+
+  function applyScopeView() {
+    if (SCOPE === "water") BUILDINGS = WBUILDS;
+    else if (SCOPE === "all") BUILDINGS = DEVICES.concat(WBUILDS);
+    else BUILDINGS = DEVICES;
+  }
+
+  // 新增记录：device/water 作用域直接写视图（即对应库）；all 作用域按归属路由
+  function addRec(b) {
+    if (SCOPE === "all") { storeOf(b).push(b); BUILDINGS = DEVICES.concat(WBUILDS); }
+    else BUILDINGS.push(b);
+  }
+
+  // 删除记录：两层同时按 id 清除后重建视图（避免 BUILDINGS 被 filter 后与库脱钩）
+  function removeIds(ids) {
+    DEVICES = DEVICES.filter(function (x) { return ids.indexOf(x.id) < 0; });
+    WBUILDS = WBUILDS.filter(function (x) { return ids.indexOf(x.id) < 0; });
+    applyScopeView();
+  }
+
+  function scopeLabel(sc) { sc = sc || SCOPE; return sc === "water" ? "水工建筑物" : (sc === "all" ? "全部（两层）" : "感知设备"); }
+
+  function setScope(sc) {
+    if (["device", "water", "all"].indexOf(sc) < 0) sc = "device";
+    if (sc === SCOPE) { try { refreshScopeUI(); } catch (e) {} return; }
+    SCOPE = sc;
+    try { SETTINGS.scope = sc; saveSettings(); } catch (e) {}
+    applyScopeView();
+    try { render(); } catch (e) {}
+    try { buildLegend(); } catch (e) {}
+    try { refreshScopeUI(); } catch (e) {}
+    try { toast("已切换到：" + scopeLabel()); } catch (e) {}
+  }
+
+  function refreshScopeUI() {
+    var b = document.getElementById("btnScope");
+    if (b) b.textContent = (SCOPE === "water" ? "🔷 建筑物" : (SCOPE === "all" ? "⬜ 全部" : "🟢 设备"));
+    var el = document.getElementById("scopeChips");
+    if (el) el.querySelectorAll("[data-scope]").forEach(function (c) { c.classList.toggle("on", c.dataset.scope === SCOPE); });
+  }
+
+  function openScopeSheet() {
+    var defs = [["device", "🟢 感知设备（默认）"], ["water", "🔷 水工建筑物"], ["all", "⬜ 全部（两层叠加）"]];
+    var html =
+      '<p style="font-size:13px;color:#555;margin:0 0 10px">选择当前数据层。切换后「地图 / 筛选 / 查询 / 列表 / 统计 / 周边搜索」都只作用于所选层。</p>' +
+      '<div id="scopeChips" class="chips" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">' +
+      defs.map(function (o) {
+        return '<span class="chip' + (SCOPE === o[0] ? " on" : "") + '" data-scope="' + o[0] + '" style="cursor:pointer;padding:7px 12px;border-radius:16px">' + o[1] + "</span>";
+      }).join("") +
+      "</div>" +
+      '<div style="font-size:12px;color:#888;line-height:1.7">· 感知设备库：<b>' + DEVICES.length + '</b> 条（本地库键 perc_map_v2）<br>' +
+      '· 水工建筑物层：<b>' + WBUILDS.length + '</b> 条（本地库键 perc_water_v2）<br>' +
+      '· 两层完全独立：导入水工建筑物只写建筑物层，<b>不会影响或覆盖感知设备数据</b>。</div>' +
+      '<div class="form-actions"><button class="btn-cancel" onclick="closeSheet(\'sheetGen\')">关闭</button></div>';
+    $("genTitle").textContent = "数据层切换";
+    $("genBody").innerHTML = html;
+    $("genBody").querySelectorAll("[data-scope]").forEach(function (c) {
+      c.onclick = function () { setScope(c.dataset.scope); openScopeSheet(); };
+    });
+    openSheet("sheetGen");
+  }
+
+  function clearWaterLayer() {
+    if (!WBUILDS.length) { toast("水工建筑物层已为空"); return; }
+    ask("清空水工建筑物层", "将清空<b>水工建筑物层</b>的 " + WBUILDS.length + " 条数据（<b>不影响感知设备数据</b>，且不可恢复）。是否继续？",
+      [{ t: "清空", cls: "btn-exit", v: 1 }, { t: "取消", cls: "btn-cancel2", v: 0 }],
+      function (ok) {
+        if (!ok) return;
+        WBUILDS = [];
+        applyScopeView(); save(); render(); buildLegend(); toast("已清空水工建筑物层");
+      });
+  }
+
+  window.appSetScope = function (sc) { setScope(sc); };
+  window.appGetScope = function () { return SCOPE; };
+  window.appScopeLabel = function (sc) { return scopeLabel(sc); };
+  window.appWaterBuildings = function () { return WBUILDS; };
+  window.appDevices = function () { return DEVICES; };
+  window.appKindOf = kindOf;
+  window.appRemoveIds = removeIds;
+  window.openScopeSheet = openScopeSheet;
+  window.clearWaterLayer = clearWaterLayer;
+  window.refreshScopeUI = refreshScopeUI;
 
   function resetData() {
 
@@ -2175,7 +2289,9 @@ function orgValOrDefault(b, k) {
 
         if (!ok) return;
 
-        BUILDINGS = JSON.parse(JSON.stringify(window.PERCEPTION_DATA || window.SHUILI_DATA || []));
+        DEVICES = JSON.parse(JSON.stringify(window.PERCEPTION_DATA || window.SHUILI_DATA || []));
+        WBUILDS = waterSeed();
+        applyScopeView();
 
         save(); render(); toast("已恢复初始数据");
 
@@ -2283,7 +2399,7 @@ function orgValOrDefault(b, k) {
 
       openEdit({
 
-        id: "b" + Date.now(),
+        id: (SCOPE === "water" ? "w" : "b") + Date.now(),
 
         name: "新建筑物", office: "", station: "", chan: "", btype: "",
 
@@ -2771,7 +2887,8 @@ function orgValOrDefault(b, k) {
 
         // 性能：popup 懒构造（点击时才生成 DOM，避免 557 个 marker 全量预构造）
 
-        var m = L.marker([b.lat, b.lon], { icon: makeIcon(colorForType(b.btype || "其他"), shapeForType(b.btype || "其他")) })
+        var __isW = (kindOf(b) === "water");
+        var m = L.marker([b.lat, b.lon], { zIndexOffset: __isW ? -1000 : 0, icon: makeIcon(__isW ? "#8a8f98" : colorForType(b.btype || "其他"), __isW ? "▣" : shapeForType(b.btype || "其他")) })
 
           .bindPopup(function () { return popupHtml(b); });
 
@@ -2799,7 +2916,7 @@ function orgValOrDefault(b, k) {
 
     });
 
-    $("count").textContent = "显示 " + shown + " / " + total + "（筛选）共 " + BUILDINGS.length;
+    $("count").textContent = "[" + scopeLabel() + "] 显示 " + shown + " / " + total + "（筛选）共 " + BUILDINGS.length;
 
     if (listMode) renderList();
 
@@ -3318,6 +3435,9 @@ function orgValOrDefault(b, k) {
     if (all.length > types.length) html += '<div class="lg" style="color:#888">……等共 ' + all.length + ' 类</div>';
 
     html += '<div class="lg" style="margin-top:4px;color:#888">—— 蓝线为渠道</div>';
+    html += '<div class="lg" style="margin-top:6px;border-top:1px dashed #ccc;padding-top:5px"><b>当前数据层：' + scopeLabel() + '</b></div>';
+    if (SCOPE === "all") html += '<div class="lg"><span class="dot" style="background:#8a8f98;color:#fff">▣</span>水工建筑物（灰色置底）</div>';
+    html += '<div class="lg" style="color:#888">感知设备 ' + DEVICES.length + ' 条 · 水工建筑物 ' + WBUILDS.length + ' 条</div>';
 
     var el = $("legend"); if (!el) {
 
@@ -3381,6 +3501,12 @@ function orgValOrDefault(b, k) {
   // 全局桥接③：尾部注入模块（游记/升级备份/知识库）会裸引用主数据数组 BUILDINGS；
   // 该变量会被重新赋值（重载/恢复数据），故桥接为 getter 而非静态值，否则引用过期 → script error
   try { Object.defineProperty(window, "BUILDINGS", { get: function () { return BUILDINGS; }, configurable: true }); } catch (e) { window.BUILDINGS = BUILDINGS; }
+  // 全局桥接④（v1.48）：水工建筑物数据层 / 作用域，供尾部注入模块与 AI 使用
+  try {
+    Object.defineProperty(window, "WATER_BUILDINGS_LIVE", { get: function () { return WBUILDS; }, configurable: true });
+    Object.defineProperty(window, "DEVICE_BUILDINGS_LIVE", { get: function () { return DEVICES; }, configurable: true });
+    Object.defineProperty(window, "BUILDINGS_SCOPE", { get: function () { return SCOPE; }, configurable: true });
+  } catch (e) {}
 
 
 
@@ -3570,6 +3696,23 @@ function orgValOrDefault(b, k) {
         { k: "impPhoto", ico: "🖼️", t: "批量导入照片", f: batchImportPhotos },
 
         { k: "expPhoto", ico: "🗂️", t: "导出照片（按管理所）", f: exportPhotos }
+
+      ]},
+
+      // v1.48：水工建筑物数据层（独立库，只导入不影响感知设备数据）
+      { g: "水工建筑物层", ico: "🏗️", items: [
+
+        { k: "impWaterBld", ico: "🏗️", t: "导入水工建筑物（只写建筑物层）", f: function () { IMPORT_KIND = "water"; importKmz(); } },
+
+        { k: "expWaterBld", ico: "📤", t: "导出水工建筑物（ovkmz）", f: function () { setScope("water"); openExportKmz(); } },
+
+        { k: "scopeSwitch", ico: "🧭", t: "数据层切换（设备 / 建筑物 / 全部）", f: function () { closeSheet("sheetMenu"); openScopeSheet(); } },
+
+        { k: "addWaterBld", ico: "➕", t: "新增建筑物 / 地点（点地图定位）", f: function () { closeSheet("sheetMenu"); setScope("water"); setTimeout(function () { if (!addMode) toggleAdd(); }, 150); toast("请在建筑物层地图上点击位置"); } },
+
+        { k: "nbCrossQA", ico: "🔎", t: "跨层周边查询（建筑物 ↔ 设备）", f: function () { closeSheet("sheetMenu"); openCrossQaSheet(); } },
+
+        { k: "clrWaterBld", ico: "🧽", t: "清空水工建筑物层", f: clearWaterLayer }
 
       ]},
 
@@ -4840,6 +4983,12 @@ function orgValOrDefault(b, k) {
 
     $("genBody").innerHTML =
 
+      '<div class="filter-sec"><h4>数据层</h4><div class="chips" id="scopeChips" style="display:flex;flex-wrap:wrap;gap:8px">' +
+      '<span class="chip" data-scope="device" style="cursor:pointer">🟢 感知设备</span>' +
+      '<span class="chip" data-scope="water" style="cursor:pointer">🔷 水工建筑物</span>' +
+      '<span class="chip" data-scope="all" style="cursor:pointer">⬜ 全部</span>' +
+      '</div><div style="font-size:12px;color:#888;margin-top:4px">共 ' + DEVICES.length + ' 台设备 · ' + WBUILDS.length + ' 座建筑物</div></div>' +
+
       '<div class="filter-count" id="filterCount"></div>' +
 
       // Req 6：关键词可在筛选面板内直接查看/修改，与顶部查询框双向同步
@@ -4931,6 +5080,12 @@ function orgValOrDefault(b, k) {
     };
 
     updateFilterCount();
+
+    // v1.48：数据层切换 chip
+    $("genBody").querySelectorAll("#scopeChips [data-scope]").forEach(function (c) {
+      c.onclick = function () { setScope(c.dataset.scope); openFilter(); };
+    });
+    refreshScopeUI();
 
     bindPhotoMin();
 
@@ -5512,6 +5667,138 @@ function orgValOrDefault(b, k) {
     s.textContent = '.qf-box{margin-top:8px}.qf-hint{font-size:12px;color:#888;margin:4px 0 6px;line-height:1.5}.qf-chips{display:flex;flex-wrap:wrap;gap:6px}.qf-chip{cursor:pointer;user-select:none;padding:5px 10px;border:1px solid var(--border,rgba(0,0,0,.15));border-radius:14px;background:rgba(33,150,243,.08);font-size:13px;transition:background .15s}.qf-chip:hover{background:rgba(33,150,243,.18)}.qf-chip .n{color:#1976d2;font-weight:600;margin-left:4px}.qf-dim{opacity:.7;margin-right:2px}';
     (document.head || document.documentElement).appendChild(s);
   })();
+  /* ---------- v1.48：跨层自然语言「周边查询」（建筑物 ↔ 感知设备，本地算完再出结论） ---------- */
+  function qaFind(name) {
+    var all = DEVICES.concat(WBUILDS), kw = String(name || "").trim();
+    if (!kw) return [];
+    var hit = all.filter(function (x) { return x.name === kw; });
+    if (!hit.length) hit = all.filter(function (x) { return x.name && x.name.indexOf(kw) >= 0; });
+    if (!hit.length) hit = all.filter(function (x) { return x.name && kw.indexOf(x.name) >= 0; });
+    return hit;
+  }
+  function qaLayerOfText(txt) {
+    var t = String(txt || "");
+    if (/感知|设备|监测|监控|雨量|水位|视频|渗流|位移|传感|子系统/.test(t)) return "device";
+    if (/建筑|水工|桥|闸|渠|泵站|水库|堤|坝|涵|渡槽|倒虹吸|段/.test(t)) return "water";
+    return null;
+  }
+  function qaDist(a, b) {
+    try { return map.distance(L.latLng(a.lat, a.lon), L.latLng(b.lat, b.lon)); }
+    catch (e) {
+      var R = 6371000, r = Math.PI / 180;
+      var dLat = (b.lat - a.lat) * r, dLon = (b.lon - a.lon) * r;
+      var s = Math.sin(dLat / 2), s2 = Math.sin(dLon / 2);
+      var h = s * s + Math.cos(a.lat * r) * Math.cos(b.lat * r) * s2 * s2;
+      return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+    }
+  }
+  function qaOrgParts(x) { return [x.guanchu || "", x.office || "", x.station || ""].filter(function (v) { return !!v; }); }
+
+  window.appCrossLayerQA = function (text) {
+    var t = String(text || "").replace(/\s+/g, "");
+    if (!/周边|附近|周围/.test(t) || !/几|多少/.test(t)) return false;
+    var m = t.match(/^(.+?)(?:的)?(?:周边|附近|周围)(?:有|共|大约|约)?(?:几|多少)(?:个|座|处|条|台|套)?(.*)$/);
+    if (!m) return false;
+    var centerName = m[1].replace(/^(查询|检索|查找|帮我查)/, "").trim();
+    var targetTxt = String(m[2] || "").replace(/^的/, "").replace(/[?？。！!，,]$/, "").trim();
+    var centers = qaFind(centerName);
+    if (!centers.length) return false;
+
+    var rMatch = t.match(/(\d+(?:\.\d+)?)(公里|千米|km|KM|米|m|M)/);
+    var radius = 200;
+    if (rMatch) { var n = parseFloat(rMatch[1]); radius = /公里|千米|km|KM/.test(rMatch[2]) ? n * 1000 : n; }
+
+    var c0 = centers[0];
+    var cLayer = kindOf(c0);
+    var tLayer = qaLayerOfText(targetTxt) || (cLayer === "water" ? "device" : "water");
+    var pool = (tLayer === "water") ? WBUILDS : DEVICES;
+    var layerName = (tLayer === "water") ? "水工建筑物" : "感知设备";
+
+    var html = '<div style="font-size:13px;line-height:1.7">';
+    html += '<p style="margin:0 0 6px"><b>中心：</b>' + esc(c0.name) + '（' + (cLayer === "water" ? "水工建筑物" : "感知设备") + '）'
+         + (centers.length > 1 ? ' <span style="color:#b06a00">同名/近名 ' + centers.length + ' 条，按第一条计算</span>' : '') + '</p>';
+
+    if (c0.lat == null || c0.lon == null) {
+      var parts = qaOrgParts(c0);
+      var same = pool.filter(function (x) {
+        var q = qaOrgParts(x);
+        for (var i = 0; i < parts.length; i++) if (q.indexOf(parts[i]) >= 0) return true;
+        return false;
+      });
+      html += '<p style="color:#b06a00;margin:0 0 6px">该记录<b>无坐标</b>，无法按距离计算，改按「同管理单位」口径统计。</p>';
+      html += '<p style="color:#2b8a5d;margin:0 0 6px">同一管理单位（管理处 / 管理所 / 管理站）内共有 <b>' + same.length + '</b> 个' + layerName + '。</p>';
+      same.slice(0, 30).forEach(function (x) {
+        html += '<div class="list-card" style="margin-bottom:4px;padding:6px 10px">' + esc(x.name || "(未命名)")
+             + '　<small style="color:#888">' + esc(x.btype || "") + (x.office ? " · " + esc(x.office) : "") + '</small></div>';
+      });
+    } else {
+      var near = [];
+      pool.forEach(function (x) {
+        if (x === c0 || x.lat == null || x.lon == null) return;
+        var d = qaDist(c0, x);
+        if (d <= radius) near.push({ x: x, d: d });
+      });
+      near.sort(function (a, b) { return a.d - b.d; });
+      html += '<p style="color:#2b8a5d;margin:0 0 6px"><b>' + fmtDist(radius) + ' 内共有 ' + near.length + ' 个' + layerName + '</b>'
+           + (near.length ? '，最近 ' + fmtDist(near[0].d) + '（' + esc(near[0].x.name || "") + '）' : '') + '。</p>';
+      if (near.length) {
+        window.__qaLast = { centerId: c0.id, radius: radius, layer: tLayer };
+        near.slice(0, 30).forEach(function (r) {
+          html += '<div class="list-card" style="margin-bottom:4px;padding:6px 10px;display:flex;justify-content:space-between;gap:8px">' +
+            '<span>' + esc(r.x.name || "(未命名)") + '　<small style="color:#888">' + esc(r.x.btype || "") + (r.x.office ? " · " + esc(r.x.office) : "") + '</small></span>' +
+            '<a href="javascript:void(0)" onclick="appFly(\'' + String(r.x.id).replace(/'/g, "") + '\')">' + fmtDist(r.d) + ' 定位</a></div>';
+        });
+        if (near.length > 30) html += '<p style="color:#888">……共 ' + near.length + ' 条，仅列前 30 条</p>';
+        html += '<div class="form-actions" style="margin-top:8px"><button class="btn-save" onclick="appQaExport()">导出结果 CSV</button>' +
+                '<button class="btn-cancel" onclick="closeSheet(\'sheetGen\')">关闭</button></div>';
+      }
+    }
+    html += '</div>';
+    $("genTitle").textContent = "跨层周边查询";
+    $("genBody").innerHTML = html;
+    openSheet("sheetGen");
+    return true;
+  };
+
+  // 菜单入口：给一个带示例提示的输入面板，避免用户不知道句式
+  function openCrossQaSheet() {
+    var html =
+      '<p style="font-size:13px;color:#555;margin:0 0 8px">用自然语言问「某对象周边有几个另一层对象」，<b>结果全部本地按距离算出</b>，不经过网络。</p>' +
+      '<input class="f" id="crossQaInput" placeholder="例：温泉水库周边有几个感知设备" style="margin-bottom:8px">' +
+      '<div style="font-size:12px;color:#888;line-height:1.8">可用句式：<br>· XX周边有几个感知设备<br>· XX附近有几座水工建筑物<br>· XX周边500米内有多少个感知设备</div>' +
+      '<div class="form-actions"><button class="btn-save" onclick="appCrossQaGo()">查询</button><button class="btn-cancel" onclick="closeSheet(\'sheetGen\')">关闭</button></div>' +
+      '<div id="crossQaOut" style="margin-top:10px"></div>';
+    $("genTitle").textContent = "跨层周边查询";
+    $("genBody").innerHTML = html;
+    openSheet("sheetGen");
+  }
+  window.openCrossQaSheet = openCrossQaSheet;
+  window.appCrossQaGo = function () {
+    var v = ($("crossQaInput") || {}).value || "";
+    v = String(v).trim();
+    if (!v) { toast("请输入查询语句"); return; }
+    if (!window.appCrossLayerQA(v)) toast("未识别该句式或未找到同名对象，请改写后重试");
+  };
+
+  window.appQaExport = function () {
+    var q = window.__qaLast; if (!q) { toast("没有可导出的结果"); return; }
+    var c0 = DEVICES.concat(WBUILDS).filter(function (x) { return x.id === q.centerId; })[0];
+    if (!c0) { toast("中心对象已不存在"); return; }
+    var pool = (q.layer === "water") ? WBUILDS : DEVICES;
+    var rows = [["名称", "类型", "管理处", "管理所", "管理站", "经度", "纬度", "距离(米)"]];
+    pool.forEach(function (x) {
+      if (x === c0 || x.lat == null || x.lon == null) return;
+      var d = qaDist(c0, x);
+      if (d <= q.radius) rows.push([x.name || "", x.btype || "", x.guanchu || "", x.office || "", x.station || "", x.lon, x.lat, d.toFixed(1)]);
+    });
+    var csv = "\ufeff" + rows.map(function (r) {
+      return r.map(function (v) { return '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"'; }).join(",");
+    }).join("\r\n");
+    var name = String(c0.name || "中心").replace(/[\\/:*?"<>|]/g, "_") + "_周边" + (q.layer === "water" ? "建筑物" : "设备") + "_" + getTodayStr() + ".csv";
+    try { saveBlobFile(new Blob([csv], { type: "text/csv;charset=utf-8" }), name); toast("已导出：" + name); }
+    catch (e) { toast("导出失败：" + (e && e.message || e)); }
+  };
+
   window.doQueryConfirm = function () {
 
     var sb = $("search");
@@ -5527,6 +5814,8 @@ function orgValOrDefault(b, k) {
       return;
 
     }
+
+    if (window.appCrossLayerQA && window.appCrossLayerQA(kw)) { return; } // v1.48：跨层周边自然语言查询
 
     filters.text = kw;
 
@@ -5849,7 +6138,7 @@ function orgValOrDefault(b, k) {
 
     });
 
-    if (b._new) { delete b._new; BUILDINGS.push(b); }
+    if (b._new) { delete b._new; addRec(b); }
 
     save(); render(); closeSheet("sheetEdit"); toast("已保存");
 
@@ -5873,7 +6162,7 @@ function orgValOrDefault(b, k) {
 
         if (!ok) return;
 
-        BUILDINGS = BUILDINGS.filter(function (x) { return x.id !== id; });
+        removeIds([id]);
 
         save(); render(); closeSheet("sheetEdit"); toast("已删除");
 
@@ -6363,7 +6652,9 @@ function orgValOrDefault(b, k) {
 
       '</div>' +
 
-      '<div id="nbBWrap"><label class="f">中心建筑物</label><select class="f" id="nearbyCenter">' +
+      '<label class="f">① 中心数据层</label><select class="f" id="nbCenterScope" onchange="nbRebuildCenters()"><option value="all">全部（设备+建筑物）</option><option value="device">感知设备</option><option value="water">水工建筑物</option></select>' +
+
+      '<div id="nbBWrap"><label class="f">中心对象</label><select class="f" id="nearbyCenter">' +
 
         bpts.map(function (b) { return '<option value="' + esc(b.id) + '">' + esc(b.name) + '</option>'; }).join("") +
 
@@ -6375,7 +6666,9 @@ function orgValOrDefault(b, k) {
 
       '<label class="f">搜索半径（米）</label><input class="f" type="number" id="nearbyRadius" value="1000" min="50" max="50000">' +
 
-      '<label class="f">周边建筑物类型（可选，留空=全部）</label><div class="chips" id="nbTypes">' + typeChips + '</div>' +
+      '<label class="f">② 目标数据层</label><select class="f" id="nbTargetScope"><option value="same">与中心不同层</option><option value="device">感知设备</option><option value="water">水工建筑物</option><option value="all">两层都要</option></select>' +
+
+      '<label class="f">周边类型（可选，留空=全部）</label><div class="chips" id="nbTypes">' + typeChips + '</div>' +
 
       '<div class="form-actions"><button class="btn-save" onclick="appDoNearby()">搜索</button></div>' +
 
@@ -6412,6 +6705,18 @@ function orgValOrDefault(b, k) {
       el.onclick = function () { setMode(el.dataset.m); if (el.dataset.m === "gps") nbGetGPS(); };
 
     });
+
+    // v1.48：中心对象按所选数据层重建
+    window.nbRebuildCenters = function () {
+      var sc = ($("nbCenterScope") || {}).value || "all";
+      var pool = sc === "water" ? WBUILDS : (sc === "device" ? DEVICES : DEVICES.concat(WBUILDS));
+      var sel = $("nearbyCenter"); if (!sel) return;
+      sel.innerHTML = pool.filter(function (b) { return b.lat != null; })
+        .map(function (b) { return '<option value="' + esc(b.id) + '">' + esc(b.name) + '</option>'; }).join("");
+      if (sc === "water") { var sb = $("nbTargetScope"); if (sb) sb.value = "device"; }
+      if (sc === "device") { var st = $("nbTargetScope"); if (st) st.value = "water"; }
+    };
+    nbRebuildCenters();
 
     if (restore && nearbyPicked) {
 
@@ -6467,6 +6772,8 @@ function orgValOrDefault(b, k) {
 
   };
 
+  function cbIsWater(id) { for (var i = 0; i < WBUILDS.length; i++) if (WBUILDS[i].id === id) return true; return false; }
+
   window.appDoNearby = function () {
 
     var seg = $("genBody").querySelector(".seg.on");
@@ -6485,11 +6792,11 @@ function orgValOrDefault(b, k) {
 
       var centerId = $("nearbyCenter").value;
 
-      var cb = BUILDINGS.find(function (b) { return b.id === centerId; });
+      var cb = DEVICES.concat(WBUILDS).filter(function (b) { return b.id === centerId; })[0];
 
-      if (!cb || cb.lat == null) { toast("中心建筑物无坐标"); return; }
+      if (!cb || cb.lat == null) { toast("中心对象无坐标"); return; }
 
-      center = { lat: cb.lat, lon: cb.lon, label: cb.name };
+      center = { lat: cb.lat, lon: cb.lon, label: cb.name, id: cb.id };
 
     }
 
@@ -6503,7 +6810,12 @@ function orgValOrDefault(b, k) {
 
     var results = [];
 
-    BUILDINGS.forEach(function (b) {
+    // v1.48：目标数据层可选（设备 / 建筑物 / 两层）
+    var tsc = ($("nbTargetScope") || {}).value || "same";
+    if (tsc === "same") tsc = (cbIsWater(centerId) ? "device" : "water");
+    var pool = tsc === "water" ? WBUILDS : (tsc === "device" ? DEVICES : DEVICES.concat(WBUILDS));
+
+    pool.forEach(function (b) {
 
       if (b.lat == null) return;
 
@@ -6525,7 +6837,7 @@ function orgValOrDefault(b, k) {
 
     map.fitBounds(window._nearbyCircle.getBounds(), { padding: [30, 30] });
 
-    var html = '<p style="margin:0 0 6px"><b>中心：</b>' + esc(center.label) + ' · 半径 ' + fmtDist(radius) + (types.length ? ' · 类型：' + types.join("/") : "") + '</p>';
+    var html = '<p style="margin:0 0 6px"><b>中心：</b>' + esc(center.label) + ' · 目标层：' + scopeLabel(tsc === "all" ? "all" : tsc) + ' · 半径 ' + fmtDist(radius) + (types.length ? ' · 类型：' + types.join("/") : "") + '</p>';
 
     if (results.length === 0) {
 
@@ -7143,7 +7455,7 @@ function orgValOrDefault(b, k) {
 
         var ids = picks.map(function (b) { return b.id; });
 
-        BUILDINGS = BUILDINGS.filter(function (b) { return ids.indexOf(b.id) < 0; });
+        removeIds(ids);
 
         save(); render();
 
@@ -8440,6 +8752,7 @@ function orgValOrDefault(b, k) {
   /* ---------- 批量导入建筑物 ---------- */
 
   function batchImportBuildings() {
+    beginImport(null); // v1.48：按当前作用域决定落库目标
 
     var html = '<div style="font-size:14px;color:#555;margin-bottom:12px">' +
 
@@ -8860,7 +9173,7 @@ function orgValOrDefault(b, k) {
 
           }
 
-          BUILDINGS.push(nb);
+          importTargetStore().push(nb);
 
           added++;
 
@@ -9761,6 +10074,14 @@ function orgValOrDefault(b, k) {
   var PLATFORM_COMPARE = [
 
     { f: "本地向量智能化内核（参数反查 / 统计 / 文档关联 / 报告导出 / PDF转Word / 类型知识库）", a: "✅", i: "✅", w: "✅", u: "✅", n: "kb_vector.js：离线哈希 TF-IDF + 余弦，无需联网" },
+
+    { v: "v1.46", d: "2026-09-11", note: "本版（内部版，与水利 v3.70 / 古建 v3.7.10 同步）：①口令门提示去除具体口令残留（只留「开发者分机号」）；②本地导入/导出不再误报「非WiFi网络」，改为按文件大小智能提示（<100MB 静默、≥100MB 弹「操作提示」）；③管理处组织一致性修复（筛选栏与组织与类型管理同源、可添加/改名、导入别名不再串到管理所）；④菜单重构：新增「导入与导出」「数据维护」「备忘录」三组，知识库管理移出设置并入「知识库与智能」，PDF 转 Word 归入导入与导出（全部菜单与功能一律不删）；⑤回灌水利公共模块 kb_rag.js / ai_module.js / ovobj_bridge.js —— 知识库「整句切片」与「导出 ovobj 文件名可编辑」在感知端真正落地（此前版本变更曾误标为已完成）。", rows: [
+      { f: "口令门提示去掉具体口令（仅提示「开发者分机号」）", a: "✅", i: "✅", w: "✅", u: "✅", n: "secure_boot.js 不再拼接 DEV_EXT 变量" },
+      { f: "本地导入/导出弹窗智能化（本地操作不再报「非WiFi网络」）", a: "✅", i: "✅", w: "✅", u: "✅", n: "<100MB 静默执行；≥100MB 弹「操作提示 / 文件大小…耗时较长，是否继续」" },
+      { f: "管理处一致性（筛选栏 ↔ 组织与类型管理 同源、可增改）", a: "✅", i: "✅", w: "✅", u: "✅", n: "首启补齐 5 个处；筛选栏「管理处」新增 ＋添加 / ✎改名；FIELD_ALIAS 修正" },
+      { f: "菜单重构：导入与导出 / 数据维护 / 备忘录 独立成组", a: "✅", i: "✅", w: "✅", u: "✅", n: "知识库管理移出设置；PDF 转 Word 归入导入与导出；功能与菜单 0 删除" },
+      { f: "回灌水利公共模块（知识库整句切片 / 导出 ovobj 文件名可编辑 真正落地）", a: "✅", i: "✅", w: "✅", u: "✅", n: "kb_rag.js / ai_module.js / ovobj_bridge.js 三端 md5 一致（新增门禁）" }
+    ]},
 
     { v: "v1.42", d: "2026-09-09", note: "本版（内部版）：水利/感知 内部版新增访问口令保护（默认口令=开发者分机号；记住口令 / 修改口令 / 忘记口令），公开版免密；版本与四平台同步。", rows: [
       { f: "内部版访问口令保护（默认口令=开发者分机号）", a: "✅", i: "✅", w: "✅", u: "✅", n: "首启弹口令门+记住口令选项；设置-修改口令/忘记口令；公开版免密" }
@@ -10743,6 +11064,7 @@ function orgValOrDefault(b, k) {
   /* ---------- 导入 ovkmz（原生大文件管线：解压到磁盘 + 进度 + 续传 + 内容比对）---------- */
 
   function importKmz() {
+    beginImport(IMPORT_KIND); // v1.48：本次导入落库目标（设备层 / 建筑物层）在同步阶段固定
 
     if (window.Android && typeof window.Android.pickFiles === "function") {
 
@@ -10960,7 +11282,7 @@ function orgValOrDefault(b, k) {
 
           upd++;
 
-        } else { BUILDINGS.push(nb); added++; }
+        } else { importTargetStore().push(nb); added++; }
 
       });
 
@@ -12887,6 +13209,8 @@ function orgValOrDefault(b, k) {
   // v3.24：顶栏「🔍 查询」= 查询确认（输入关键词后点击：0 提示 / 1 定位 / 多结果绿色虚线圈选）
 
   if (btnQuery) btnQuery.onclick = function () { window.doQueryConfirm(); };
+  var btnScope = $("btnScope");
+  if (btnScope) btnScope.onclick = function () { openScopeSheet(); };
 
   if (btnFilter) btnFilter.onclick = openFilter;
 
