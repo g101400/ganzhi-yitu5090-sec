@@ -2163,11 +2163,14 @@ function orgValOrDefault(b, k) {
       DEVICES = s ? JSON.parse(s) : JSON.parse(JSON.stringify(embedded));
     } catch (e) { DEVICES = JSON.parse(JSON.stringify(embedded)); }
     if (!Array.isArray(DEVICES)) DEVICES = [];
+    var seeded = false;
     try {
       var w = localStorage.getItem(LS_KEY_WATER);
-      WBUILDS = w ? JSON.parse(w) : waterSeed();
-    } catch (e) { WBUILDS = waterSeed(); }
+      if (w) { WBUILDS = JSON.parse(w); } else { WBUILDS = waterSeed(); seeded = true; }
+    } catch (e) { WBUILDS = waterSeed(); seeded = true; }
     if (!Array.isArray(WBUILDS)) WBUILDS = [];
+    // 内置种子：首次安装（建筑物层本地库为空）用 water_data.js 播种并固化，之后以本地库为准
+    if (seeded && WBUILDS.length) { try { localStorage.setItem(LS_KEY_WATER, JSON.stringify(WBUILDS)); } catch (e) {} }
     SCOPE = (SETTINGS && SETTINGS.scope) || "device";
     if (["device", "water", "all"].indexOf(SCOPE) < 0) SCOPE = "device";
     applyScopeView();
@@ -2247,14 +2250,30 @@ function orgValOrDefault(b, k) {
       "</div>" +
       '<div style="font-size:12px;color:#888;line-height:1.7">· 感知设备库：<b>' + DEVICES.length + '</b> 条（本地库键 perc_map_v2）<br>' +
       '· 水工建筑物层：<b>' + WBUILDS.length + '</b> 条（本地库键 perc_water_v2）<br>' +
-      '· 两层完全独立：导入水工建筑物只写建筑物层，<b>不会影响或覆盖感知设备数据</b>。</div>' +
-      '<div class="form-actions"><button class="btn-cancel" onclick="closeSheet(\'sheetGen\')">关闭</button></div>';
+      '· 两层完全独立：导入水工建筑物只写建筑物层，<b>不会影响或覆盖感知设备数据</b>。<br>' +
+      '· 建筑物层<b>内置种子</b>：' + waterSeed().length + ' 条（清空后不会自动重建，可点下方「重新播种」恢复）。</div>' +
+      '<div class="form-actions" style="display:flex;gap:8px;flex-wrap:wrap">' +
+      '<button class="btn-save" onclick="closeSheet(\'sheetGen\');appReseedWater();">🌱 重新播种内置种子</button>' +
+      '<button class="btn-cancel" onclick="closeSheet(\'sheetGen\')">关闭</button></div>';
     $("genTitle").textContent = "数据层切换";
     $("genBody").innerHTML = html;
     $("genBody").querySelectorAll("[data-scope]").forEach(function (c) {
       c.onclick = function () { setScope(c.dataset.scope); openScopeSheet(); };
     });
     openSheet("sheetGen");
+  }
+
+  function reseedWaterLayer() {
+    var seed = waterSeed();
+    if (!seed.length) { toast("未内置水工建筑物种子"); return; }
+    ask("重新播种水工建筑物层", "将用<b>内置种子</b>（" + seed.length + " 条）<b>替换</b>建筑物层现有数据（<b>不影响感知设备数据</b>）。是否继续？",
+      [{ t: "播种", cls: "btn-confirm2", v: 1 }, { t: "取消", cls: "btn-cancel2", v: 0 }],
+      function (ok) {
+        if (!ok) return;
+        WBUILDS = seed;
+        try { localStorage.setItem(LS_KEY_WATER, JSON.stringify(WBUILDS)); } catch (e) {}
+        applyScopeView(); save(); render(); buildLegend(); toast("已播种 " + WBUILDS.length + " 条水工建筑物");
+      });
   }
 
   function clearWaterLayer() {
@@ -2277,6 +2296,8 @@ function orgValOrDefault(b, k) {
   window.appRemoveIds = removeIds;
   window.openScopeSheet = openScopeSheet;
   window.clearWaterLayer = clearWaterLayer;
+  window.appReseedWater = reseedWaterLayer;
+  window.appWaterSeedCount = function () { return waterSeed().length; };
   window.refreshScopeUI = refreshScopeUI;
 
   function resetData() {
@@ -3711,6 +3732,8 @@ function orgValOrDefault(b, k) {
         { k: "addWaterBld", ico: "➕", t: "新增建筑物 / 地点（点地图定位）", f: function () { closeSheet("sheetMenu"); setScope("water"); setTimeout(function () { if (!addMode) toggleAdd(); }, 150); toast("请在建筑物层地图上点击位置"); } },
 
         { k: "nbCrossQA", ico: "🔎", t: "跨层周边查询（建筑物 ↔ 设备）", f: function () { closeSheet("sheetMenu"); openCrossQaSheet(); } },
+
+        { k: "reseedWaterBld", ico: "🌱", t: "重新播种内置建筑物种子", f: function () { closeSheet("sheetMenu"); reseedWaterLayer(); } },
 
         { k: "clrWaterBld", ico: "🧽", t: "清空水工建筑物层", f: clearWaterLayer }
 
